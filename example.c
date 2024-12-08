@@ -34,6 +34,7 @@ int main(void) {
     }
 
     am_unload_all(&am);
+    am_destroy(&am);
     CloseWindow();
     return 0;
 }
