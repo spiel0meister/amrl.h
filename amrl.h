@@ -4,6 +4,11 @@
 
 #include <raylib.h>
 
+#ifndef _WIN32
+#include <sys/time.h>
+#else // _WIN32
+#endif // _WIN32
+
 typedef enum {
     ASSET_IMAGE,
     ASSET_TEXTURE,
@@ -22,6 +27,12 @@ typedef struct {
     const char* path1;
     const char* path2;
 
+#ifndef _WIN32
+    time_t last_modified1;
+    time_t last_modified2;
+#else // _WIN32
+#endif // _WIN32
+
     AmAssetType type;
     AmAssetAs as;
 }AmAsset;
@@ -33,6 +44,7 @@ typedef struct {
 }AmAssetManager;
 
 void am_unload_all(AmAssetManager* self);
+void am_destroy(AmAssetManager* self);
 
 Image am_get_image(AmAssetManager* self, const char* path);
 Texture am_get_texture(AmAssetManager* self, const char* path);
@@ -88,11 +100,21 @@ void am_remove_unordered_without_unloading(AmAssetManager* self, size_t i) {
     else self->assets[i] = self->assets[--self->count];
 }
 
+void am_destroy(AmAssetManager* self) {
+    free(self->assets);
+    memset(self, 0, sizeof(*self));
+}
+
 AmAsset* am_load_asset(AmAssetManager* self, AmAssetType type, ...) {
     va_list args;
 
     va_start(args, type);
     const char* path = va_arg(args, const char*);
+    const char* path2 = NULL;
+
+    if (type == ASSET_SHADER) {
+        path2 = va_arg(args, const char*);
+    }
 
     bool valid = false;
     AmAsset asset = {0};
@@ -122,9 +144,8 @@ AmAsset* am_load_asset(AmAssetManager* self, AmAssetType type, ...) {
             break;
         }break;
         case ASSET_SHADER: {
-            const char* fs_path = va_arg(args, const char*);
-            asset.path2 = fs_path;
-            asset.as.shader = LoadShader(path, fs_path);
+            asset.path2 = path2;
+            asset.as.shader = LoadShader(path, path2);
             valid = IsShaderValid(asset.as.shader);
             break;
         }break;
@@ -133,6 +154,21 @@ AmAsset* am_load_asset(AmAssetManager* self, AmAssetType type, ...) {
     va_end(args);
     
     if (valid) {
+        struct stat st;
+        if (stat(path, &st) < 0) {
+            TraceLog(LOG_INFO, "ASSET MANAGER: Couldn't stat asset \"%s\"", path);
+            return NULL;
+        }
+        asset.last_modified1 = st.st_mtime;
+
+        if (type == ASSET_SHADER) {
+            if (stat(path2, &st) < 0) {
+                TraceLog(LOG_INFO, "ASSET MANAGER: Couldn't stat asset \"%s\"", path);
+                return NULL;
+            }
+            asset.last_modified2 = st.st_mtime;
+        }
+
         TraceLog(LOG_INFO, "ASSET MANAGER: Loaded asset \"%s\"", path);
         return am_append_asset(self, asset);
     }
@@ -165,9 +201,13 @@ AmAsset* am_get_asset(AmAssetManager* self, AmAssetType type, ...) {
 
     AmAsset* result = NULL;
     const char* path1 = va_arg(args, const char*);
+    const char* path2 = NULL;
 
     if (type == ASSET_SHADER) {
-        const char* path2 = va_arg(args, const char*);
+        path2 = va_arg(args, const char*);
+    }
+
+    if (type == ASSET_SHADER) {
         for (size_t i = 0; i < self->count; ++i) {
             AmAsset* asset = &self->assets[i];
             bool is_right_asset = true;
@@ -197,6 +237,29 @@ AmAsset* am_get_asset(AmAssetManager* self, AmAssetType type, ...) {
 
         if (result == NULL) {
             result = am_load_asset(self, type, path1);
+        }
+    }
+
+    struct stat st;
+    if (stat(path1, &st) < 0) {
+        TraceLog(LOG_INFO, "ASSET MANAGER: Couldn't stat asset \"%s\"", path1);
+    }
+
+    if (result != NULL && st.st_mtime > result->last_modified1) {
+        am_unload_single_asset(result);
+        am_remove_unordered_without_unloading(self, result - self->assets);
+        result = am_load_asset(self, type, path1);
+    }
+
+    if (type == ASSET_SHADER) {
+        if (stat(path2, &st) < 0) {
+            TraceLog(LOG_INFO, "ASSET MANAGER: Couldn't stat asset \"%s\"", path1);
+        }
+
+        if (result != NULL && st.st_mtime > result->last_modified2) {
+            am_unload_single_asset(result);
+            am_remove_unordered_without_unloading(self, result - self->assets);
+            result = am_load_asset(self, type, path1, path2);
         }
     }
 
